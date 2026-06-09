@@ -1,0 +1,110 @@
+/* ── Reset & base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #f3f4f6;
+  color: #111827;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  background: #1d4ed8;
+  color: #fff;
+  padding: 1rem 2rem;
+}
+header h1 { font-size: 1.4rem; font-weight: 700; }
+
+/* ── Main layout ── */
+main {
+  max-width: 860px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Card ── */
+.card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  padding: 1.5rem;
+}
+.card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: #1d4ed8; }
+
+/* ── Form ── */
+.field { display: flex; flex-direction: column; gap: .35rem; margin-bottom: 1rem; }
+.field label { font-size: .85rem; font-weight: 600; color: #374151; }
+.required { color: #ef4444; }
+
+input[type="text"],
+textarea {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: .55rem .75rem;
+  font-size: .95rem;
+  font-family: inherit;
+  transition: border-color .15s;
+  width: 100%;
+}
+input[type="text"]:focus,
+textarea:focus {
+  outline: none;
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29,78,216,.15);
+}
+
+.actions { display: flex; gap: .75rem; }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-block;
+  padding: .55rem 1.2rem;
+  border: none;
+  border-radius: 6px;
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+.btn:hover { opacity: .85; }
+.btn-primary   { background: #1d4ed8; color: #fff; }
+.btn-secondary { background: #e5e7eb; color: #374151; }
+.btn-danger    { background: #ef4444; color: #fff; }
+.btn-small     { padding: .3rem .75rem; font-size: .8rem; }
+.hidden        { display: none !important; }
+
+/* ── Table ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .9rem;
+}
+thead th {
+  text-align: left;
+  padding: .6rem .75rem;
+  background: #f9fafb;
+  border-bottom: 2px solid #e5e7eb;
+  font-weight: 700;
+  color: #374151;
+}
+tbody tr { border-bottom: 1px solid #f3f4f6; }
+tbody tr:last-child { border-bottom: none; }
+tbody td { padding: .65rem .75rem; vertical-align: top; }
+.row-actions { display: flex; gap: .5rem; }
+.empty { text-align: center; color: #9ca3af; padding: 2rem 0; }
+.empty.error { color: #ef4444; }
+
+/* ── Banner ── */
+.banner {
+  padding: .8rem 1.2rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: .9rem;
+}
+.banner.hidden  { display: none; }
+.banner.success { background: #dcfce7; color: #166534; }
+.banner.error   { background: #fee2e2; color: #991b1b; }

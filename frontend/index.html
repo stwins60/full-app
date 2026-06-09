@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flask + MySQL App</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Flask + MySQL App</h1>
+  </header>
+
+  <main>
+    <!-- Status banner -->
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- Create / Edit form -->
+    <section class="card">
+      <h2 id="form-title">New Item</h2>
+      <form id="item-form">
+        <input type="hidden" id="edit-id" value="" />
+        <div class="field">
+          <label for="name">Name <span class="required">*</span></label>
+          <input type="text" id="name" placeholder="Item name" required />
+        </div>
+        <div class="field">
+          <label for="description">Description</label>
+          <textarea id="description" rows="3" placeholder="Optional description"></textarea>
+        </div>
+        <div class="actions">
+          <button type="submit" class="btn btn-primary" id="submit-btn">Create</button>
+          <button type="button" class="btn btn-secondary hidden" id="cancel-btn">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Items table -->
+    <section class="card">
+      <h2>Items</h2>
+      <table id="items-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Description</th>
+            <th>Created</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="items-body">
+          <tr><td colspan="5" class="empty">Loading...</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
