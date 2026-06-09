@@ -13,9 +13,9 @@ Now it is your turn.
 
 **Your Role:** DevOps Engineer at Meridian Supply Co.
 
-**Your Mission:** Take the application from a developer's laptop and deploy it to the company's Ubuntu production server so that the warehouse team can start using it on Monday morning.
+**Your Mission:** Take the application from a developer's laptop and deploy it to the company's Ubuntu production server using **Docker**. Every part of the stack — the Flask backend, the MySQL database, and the Nginx frontend — runs in its own container. No dependencies are installed directly on the host. If the server dies, you spin it up somewhere else in minutes.
 
-**The server is already provisioned.** It is running Ubuntu 22.04 LTS. It has a static IP. The domain `inventory.meridian-internal.com` already points to it. Nothing else is running on it yet.
+**The server is already provisioned.** It is running Ubuntu 22.04 LTS. It has a static IP. The domain `inventory.meridian-internal.com` already points to it. Docker and Docker Compose are the only things that need to be on it.
 
 You have SSH access. You have sudo. You have the code in `/srv/full-app`.
 
@@ -29,7 +29,7 @@ The clock is ticking.
 |--------|------|------------------------|
 | **Dana** | Lead Developer | Confirmation the app behaves exactly as it does locally |
 | **Marcus** | Warehouse Manager | A URL he can open on Monday, no training required |
-| **Priya** | IT Security | No root DB user in production, no secrets in the repo |
+| **Priya** | IT Security | No root DB user in production, no secrets in the repo, containers not running as root |
 | **You** | DevOps Engineer | To go home on Friday knowing it won't page you at 2am |
 
 ---
@@ -42,7 +42,7 @@ The repository structure handed to you:
 
 ```
 /srv/full-app/
-├── backend/              # Flask REST API — must run as a long-lived process
+├── backend/              # Flask REST API
 │   ├── app.py
 │   ├── requirements.txt
 │   ├── schema.sql        # The database structure Meridian's data will live in
@@ -66,250 +66,135 @@ The backend exposes a REST API that the frontend calls:
 | PUT | `/api/items/:id` | Updates an item |
 | DELETE | `/api/items/:id` | Removes an item |
 
-Dana confirms: the frontend and backend are meant to be served from the **same domain**. Nginx will sit in front of both — serving the static files directly and forwarding `/api/` traffic to Flask on port 5000.
+Dana confirms: the frontend and backend are served from the **same domain**. An Nginx container will sit in front of both — serving the static files directly and forwarding `/api/` traffic to the Flask container.
 
-Priya's requirement is already noted: no root database credentials. You will create a dedicated MySQL user.
+The full Docker stack will be three containers managed by Docker Compose:
+
+```
+┌─────────────────────────────────────────┐
+│            Docker Compose               │
+│                                         │
+│  ┌──────────┐      ┌──────────────────┐ │
+│  │  nginx   │─────▶│  flask-backend   │ │
+│  │ :80      │      │  :5000 (internal)│ │
+│  └──────────┘      └────────┬─────────┘ │
+│                             │           │
+│                    ┌────────▼─────────┐ │
+│                    │      mysql       │ │
+│                    │  :3306 (internal)│ │
+│                    └──────────────────┘ │
+└─────────────────────────────────────────┘
+```
+
+Only Nginx is exposed to the outside world on port 80. MySQL and Flask are internal to the Docker network.
 
 ---
 
 ## Act 2: Preparing the Server
 
-You SSH into the production server for the first time. It is a clean install. Almost nothing is on it.
+You SSH into the production server. It is a clean Ubuntu 22.04 install. The only thing you need on the host is Docker.
 
-### Install dependencies
+### Install Docker and Docker Compose
 
 ```bash
-sudo apt update && sudo apt install -y \
-  python3 python3-pip python3-venv \
-  mysql-server \
-  nginx \
-  pkg-config \
-  libmysqlclient-dev
+sudo apt update && sudo apt install -y ca-certificates curl gnupg
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 ```
 
-This installs everything Meridian's stack needs:
-- Python 3 and venv tooling for the Flask backend
-- MySQL 8 for the database
-- Nginx to serve the frontend and act as a reverse proxy
-- The MySQL C client headers, which `mysqlclient` (the Python driver) needs to compile
+Add yourself to the docker group so you do not need `sudo` on every command:
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+Verify:
+
+```bash
+docker --version
+docker compose version
+```
+
+That is all that goes on the host. Everything else lives inside containers.
 
 ---
 
-## Act 3: Setting Up the Database
+## Act 3: Writing the Dockerfiles
 
-This is the step most people rush. Don't. If the database is wrong, nothing else works.
+You need two Dockerfiles — one for the backend, one for the frontend. Dana wrote the application code. You write the container definitions.
 
-### 3.1 Lock down MySQL
+### 3.1 Backend Dockerfile
 
-The server is fresh, but MySQL installs with loose defaults. Tighten them:
+Create `backend/Dockerfile`:
 
-```bash
-sudo mysql_secure_installation
+```dockerfile
+FROM python:3.11-slim
+
+# Install the MySQL C client that mysqlclient needs to compile
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libmysqlclient-dev \
+    gcc \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Run as a non-root user — Priya's requirement
+RUN useradd -m appuser
+USER appuser
+
+EXPOSE 5000
+
+CMD ["python", "app.py"]
 ```
 
-- Set a strong root password
-- Remove anonymous users
-- Disable remote root login
-- Remove the test database
+### 3.2 Frontend Dockerfile
 
-Priya will ask if you did this. You will be able to say yes.
+The frontend is purely static files. Nginx serves them and proxies `/api/` to the Flask container.
 
-### 3.2 Create Meridian's database and a dedicated user
+Create `frontend/Dockerfile`:
 
-Log in as root:
+```dockerfile
+FROM nginx:1.25-alpine
 
-```bash
-sudo mysql -u root -p
+COPY . /usr/share/nginx/html
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
 ```
 
-Run the following — replace the password with something strong and store it in your password manager:
-
-```sql
-CREATE DATABASE meridian_inventory;
-CREATE USER 'meridian_app'@'localhost' IDENTIFIED BY 'your-strong-password';
-GRANT ALL PRIVILEGES ON meridian_inventory.* TO 'meridian_app'@'localhost';
-FLUSH PRIVILEGES;
-EXIT;
-```
-
-The user `meridian_app` only has access to one database. If the app is ever compromised, the blast radius is contained. Priya will be satisfied.
-
-### 3.3 Load the schema
-
-Dana wrote the schema. You just need to run it:
-
-```bash
-mysql -u meridian_app -p meridian_inventory < /srv/full-app/backend/schema.sql
-```
-
-No output means success. Verify:
-
-```bash
-mysql -u meridian_app -p meridian_inventory -e "SHOW TABLES;"
-```
-
-You should see the `items` table. The database is ready.
-
----
-
-## Act 4: Configuring and Starting the Backend
-
-### 4.1 Create the environment file
-
-The `.env.example` file is the contract between the developer and the environment. Copy it and fill it in:
-
-```bash
-cd /srv/full-app/backend
-cp .env.example .env
-nano .env
-```
-
-```
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=meridian_app
-MYSQL_PASSWORD=your-strong-password
-MYSQL_DB=meridian_inventory
-SECRET_KEY=generate-a-random-64-char-string-here
-FLASK_DEBUG=false
-PORT=5000
-```
-
-To generate a good `SECRET_KEY`:
-
-```bash
-python3 -c "import secrets; print(secrets.token_hex(32))"
-```
-
-Set the file permissions so only root and the service user can read it:
-
-```bash
-sudo chmod 640 /srv/full-app/backend/.env
-sudo chown root:www-data /srv/full-app/backend/.env
-```
-
-### 4.2 Install Python dependencies
-
-Never install packages into the system Python. Create a virtual environment:
-
-```bash
-cd /srv/full-app/backend
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-deactivate
-```
-
-### 4.3 Smoke test before handing it to systemd
-
-Before you write the service file, confirm the app actually starts:
-
-```bash
-cd /srv/full-app/backend
-source venv/bin/activate
-python app.py
-```
-
-In a second terminal:
-
-```bash
-curl http://localhost:5000/api/health
-```
-
-Expected response:
-
-```json
-{"db": "connected", "status": "ok"}
-```
-
-If you see that, the backend is working and the database connection is good. Dana's code is sound. Kill the manual process and hand control to systemd.
-
-### 4.4 Write the systemd service
-
-This is what makes the app survive a reboot, a crash, or a 2am server restart:
-
-```bash
-sudo nano /etc/systemd/system/meridian-backend.service
-```
-
-```ini
-[Unit]
-Description=Meridian Inventory Flask Backend
-After=network.target mysql.service
-
-[Service]
-User=www-data
-Group=www-data
-WorkingDirectory=/srv/full-app/backend
-EnvironmentFile=/srv/full-app/backend/.env
-ExecStart=/srv/full-app/backend/venv/bin/python app.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable meridian-backend
-sudo systemctl start meridian-backend
-sudo systemctl status meridian-backend
-```
-
-The status output should show `active (running)`. If it shows `failed`, check the logs:
-
-```bash
-journalctl -u meridian-backend -n 50
-```
-
----
-
-## Act 5: Serving the Frontend with Nginx
-
-The warehouse team will open a browser. They will not type port numbers. Nginx handles the rest.
-
-### 5.1 Update the frontend's API base URL
-
-Because Nginx will proxy `/api/` to Flask, the frontend no longer needs to know that Flask runs on port 5000. It just needs to call the same origin it was loaded from.
-
-Edit `frontend/js/config.js`:
-
-```bash
-nano /srv/full-app/frontend/js/config.js
-```
-
-Change it to:
-
-```js
-const API_BASE = "";  // same origin — Nginx proxies /api/ to Flask
-```
-
-### 5.2 Configure Nginx
-
-```bash
-sudo nano /etc/nginx/sites-available/meridian-inventory
-```
+Create `frontend/nginx.conf`:
 
 ```nginx
 server {
     listen 80;
-    server_name inventory.meridian-internal.com;
+    server_name _;
 
-    # Serve the static frontend
-    root /srv/full-app/frontend;
+    root /usr/share/nginx/html;
     index index.html;
 
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # Reverse proxy API calls to the Flask backend
     location /api/ {
-        proxy_pass         http://127.0.0.1:5000;
+        proxy_pass         http://backend:5000;
         proxy_http_version 1.1;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
@@ -318,46 +203,225 @@ server {
 }
 ```
 
-Enable the site, test the config, and reload:
-
-```bash
-sudo ln -s /etc/nginx/sites-available/meridian-inventory /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-`nginx -t` must say `syntax is ok` and `test is successful` before you reload. If it does not, fix the config — never reload a broken Nginx config on production.
+Notice `proxy_pass http://backend:5000` — `backend` is the Docker Compose service name. Containers on the same Compose network resolve each other by service name automatically.
 
 ---
 
-## Act 6: Go-Live Checklist
+## Act 4: Writing docker-compose.yml
 
-It is Sunday evening. Marcus needs this working by Monday morning. Run through every item on this list before you sign off.
+This is the file that ties the whole stack together. Create `docker-compose.yml` at the project root:
+
+```yaml
+services:
+
+  db:
+    image: mysql:8.0
+    container_name: meridian-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - meridian-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: meridian-backend
+    restart: always
+    environment:
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DB: ${MYSQL_DB}
+      SECRET_KEY: ${SECRET_KEY}
+      FLASK_DEBUG: "false"
+      PORT: 5000
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - meridian-net
+
+  frontend:
+    build: ./frontend
+    container_name: meridian-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - meridian-net
+
+volumes:
+  db-data:
+
+networks:
+  meridian-net:
+```
+
+Key decisions worth noting:
+
+- **`db-data` volume** — MySQL data persists across container restarts and rebuilds. The warehouse team's records will not vanish if you `docker compose down`.
+- **`schema.sql` mount** — MySQL's official image runs any `.sql` file placed in `/docker-entrypoint-initdb.d/` on first boot. Dana's schema loads automatically.
+- **`depends_on` with `service_healthy`** — the backend waits for MySQL to be genuinely ready before starting, not just started. This prevents the Flask container from crashing on boot because the database is still initialising.
+- **Only port 80 is exposed** — Flask and MySQL are unreachable from outside the Docker network. Priya will be satisfied.
+
+---
+
+## Act 5: Configuring Secrets
+
+### 5.1 Update the frontend API base URL
+
+Because Nginx handles routing inside the Docker network, the frontend calls the same origin it was loaded from. Edit `frontend/js/config.js`:
+
+```js
+const API_BASE = "";  // same origin — Nginx proxies /api/ to the backend container
+```
+
+### 5.2 Create the .env file
+
+Docker Compose reads a `.env` file in the same directory as `docker-compose.yml` and injects the values at runtime. Create it:
+
+```bash
+cd /srv/full-app
+cp backend/.env.example .env
+nano .env
+```
+
+```
+MYSQL_ROOT_PASSWORD=a-very-strong-root-password
+MYSQL_USER=meridian_app
+MYSQL_PASSWORD=another-strong-password
+MYSQL_DB=meridian_inventory
+SECRET_KEY=generate-a-random-64-char-string-here
+```
+
+Generate a good `SECRET_KEY` on the spot:
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Lock down the file so only root can read it:
+
+```bash
+sudo chmod 600 /srv/full-app/.env
+```
+
+Do not commit `.env` to version control. `.env.example` goes in the repo. `.env` stays on the server.
+
+---
+
+## Act 6: Building and Starting the Stack
+
+With the Dockerfiles, Compose file, and `.env` in place, you are ready to bring the stack up.
+
+### Build the images
+
+```bash
+cd /srv/full-app
+docker compose build
+```
+
+This builds the backend and frontend images from their respective Dockerfiles. The MySQL image is pulled from Docker Hub as-is.
+
+### Start the stack
+
+```bash
+docker compose up -d
+```
+
+The `-d` flag runs everything in the background. Docker Compose will:
+1. Pull the MySQL 8.0 image
+2. Build the Flask backend image
+3. Build the Nginx frontend image
+4. Start the `db` container and wait for its health check to pass
+5. Start `backend` once `db` is healthy
+6. Start `frontend` once `backend` is up
+
+Watch it come up:
+
+```bash
+docker compose logs -f
+```
+
+Wait until you see Flask's startup message in the `backend` logs and Nginx confirm it is ready in the `frontend` logs. Then hit `Ctrl+C` to stop following logs — the containers keep running.
+
+### Smoke test
+
+```bash
+curl http://localhost/api/health
+```
+
+Expected:
+
+```json
+{"db": "connected", "status": "ok"}
+```
+
+If you see that, all three containers are up and talking to each other correctly.
+
+---
+
+## Act 7: Making It Survive a Reboot
+
+Every service has `restart: always` in the Compose file. This tells Docker to restart individual containers if they crash. But you also need the Docker daemon itself to start on boot, which brings the containers with it.
+
+```bash
+sudo systemctl enable docker
+```
+
+Verify by rebooting the server and checking the stack came back on its own:
+
+```bash
+sudo reboot
+# ... wait for SSH to come back ...
+docker compose -f /srv/full-app/docker-compose.yml ps
+```
+
+All three containers should show `running`. Marcus does not need to know any of this happened.
+
+---
+
+## Act 8: Go-Live Checklist
+
+It is Sunday evening. Run through every item before you sign off.
 
 - [ ] `curl http://inventory.meridian-internal.com/api/health` returns `{"status":"ok","db":"connected"}`
 - [ ] Opening `http://inventory.meridian-internal.com` in a browser loads the inventory page
 - [ ] Creating a new item via the form saves it and shows it in the table
 - [ ] Editing an item updates it correctly
 - [ ] Deleting an item removes it
-- [ ] `sudo reboot` — after the server comes back up, the app is running without manual intervention
-- [ ] `systemctl status meridian-backend` shows `active (running)` after the reboot
-- [ ] The `.env` file is not readable by the `www-data` user directly (only via the service)
-- [ ] No test data left in the database from smoke testing
+- [ ] `docker compose ps` shows all three containers as `running`
+- [ ] `sudo reboot` — after the server comes back, all containers restart automatically
+- [ ] The `.env` file is not in the git repository
+- [ ] MySQL is not reachable from outside the server (`curl http://inventory.meridian-internal.com:3306` should time out)
+- [ ] No test data left in the database from smoke testing — `docker compose exec db mysql -u meridian_app -p meridian_inventory -e "DELETE FROM items;"`
 
 ---
 
-## Act 7: What Can Go Wrong (and How to Fix It)
-
-You will not always get a clean run on the first try. Here is what Dana, Marcus, and Priya have each run into before, and how to get past it.
+## Act 9: What Can Go Wrong
 
 | Symptom | What is actually happening | Fix |
 |---------|---------------------------|-----|
-| `502 Bad Gateway` in the browser | Nginx is up but Flask is not | `sudo systemctl restart meridian-backend` then `journalctl -u meridian-backend -n 30` |
-| `Access denied for user 'meridian_app'` in logs | Password or DB name mismatch in `.env` | Re-check `.env` against what you created in MySQL |
-| Frontend loads, clicking anything does nothing | `API_BASE` in `config.js` still has `localhost:5000` | Set it to `""` and hard-refresh the browser |
-| `error: command '/usr/bin/x86_64-linux-gnu-gcc' failed` during pip install | Missing C build tools for `mysqlclient` | `sudo apt install libmysqlclient-dev pkg-config build-essential` |
-| `nginx -t` fails after editing config | Syntax error in the Nginx config | Read the error line number carefully; usually a missing semicolon or brace |
-| App works but dies overnight | Server ran out of memory, OOM killer hit Flask | Check `dmesg | grep -i kill`; consider adding a swap file |
+| `backend` container exits immediately on startup | Flask cannot reach MySQL — db not ready yet | Check `docker compose logs db`; the healthcheck may need more retries if the server is slow |
+| `502 Bad Gateway` in the browser | Nginx is up but the backend container is down | `docker compose restart backend` then `docker compose logs backend` |
+| `Access denied for user` in backend logs | Credentials in `.env` do not match what MySQL was initialised with | The `db-data` volume was created with different credentials — run `docker compose down -v` to wipe it and start fresh |
+| `schema.sql` did not load | The `db-data` volume already existed from a previous run — init scripts only run on first boot | `docker compose down -v && docker compose up -d` |
+| Frontend loads but API calls fail | `API_BASE` in `config.js` still set to `localhost:5000` | Set it to `""`, rebuild the frontend image: `docker compose build frontend && docker compose up -d frontend` |
+| Port 80 already in use on the host | Another process (old Nginx, Apache) is bound to port 80 | `sudo ss -tlnp | grep :80` to find it, then stop it |
 
 ---
 
@@ -367,10 +431,10 @@ Monday morning. Marcus opens his browser, types the URL, and the inventory app l
 
 He sends a message to the team channel: "This is way better than the spreadsheet."
 
-Priya runs a quick audit. Dedicated DB user, no debug mode, secrets not in the repo, `.env` permissions locked down. She marks it compliant.
+Priya runs a quick audit. Containers running as non-root, MySQL not exposed externally, secrets not in the repo, `.env` permissions locked down. She marks it compliant.
 
 Dana gets a notification that the health check is green. She closes her laptop for the weekend, a day late but satisfied.
 
-You get nothing except the quiet confidence that it will still be running when you check on Tuesday.
+You get nothing except the quiet confidence that if the server dies tonight, you can have the entire stack running somewhere else before anyone notices.
 
 That is the job.
